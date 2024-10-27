@@ -9,6 +9,7 @@
   "private": true,
   "dependencies": {
     "copy-paste": "^1.5.3",
-    "mtgsdk": "^1.0.1"
+    "mtgsdk": "^1.0.1",
+    "scryfall-api": "^4.0.1"
   }
 }

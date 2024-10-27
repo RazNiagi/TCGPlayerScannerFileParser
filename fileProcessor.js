@@ -2,6 +2,7 @@ let readline = require('readline');
 let fs = require('fs');
 const mtgsdk = require('mtgsdk');
 const ncp = require('copy-paste');
+const scryfall = require('scryfall-api');
 readline.emitKeypressEvents(process.stdin);
 
 if (process.stdin.isTTY) {
@@ -72,6 +73,8 @@ class CardData {
 let cards = [];
 let baseValue = 0;
 let fileName = '';
+let setNameCodeMap = new Map();
+let errors = [];
 function readInFile(fileName) {
     const rl = readline.createInterface({
         input: fs.createReadStream('./' + fileName + '.csv'),
@@ -115,30 +118,64 @@ function readInFile(fileName) {
     });
 
     rl.on('close', () => {
-        addSetCodeToCards(cards.length - 1);
+        removeQuotesFromNames();
     });
 }
 
-function addSetCodeToCards(current) {
-    cards[current].setFixedName(parseCardName(cards[current].value));
-    mtgsdk.card.where({name: cards[current].fixedName, number: cards[current].number})
-        .then(data => {
-            cards[current].setSetCode(data[0]?.set);
-            if (current !== 0) {
-                addSetCodeToCards(current - 1);
-            } else {
-                filterCardsByPrice(baseValue);
-            }
-        })
-        .catch(err => {
-            console.error(err);
-            if (current !== 0) {
-                addSetCodeToCards(current - 1);
-            } else {
-                filterCardsByPrice(baseValue);
-            }
-        })
-    ;
+function removeQuotesFromNames() {
+    for (let card of cards) {
+        card.productName = card.productName.replaceAll('"', '');
+    }
+    getAllSetCodes(cards.length - 1);
+}
+
+function getAllSetCodes(current) {
+    if (setNameCodeMap.has(cards[current].setName)) {
+        getPreviousSetCodesOrAddSetCodes(current);
+    } else {
+        scryfall.Cards.byName(removeParenthesisFromCardName(cards[current].productName), true)
+            .then(currentCardData => {
+                mtgsdk.card.where({name: currentCardData.name, number: cards[current].number})
+                    .then(data => {
+                        setNameCodeMap.set(cards[current].setName, data[0]?.set);
+                        getPreviousSetCodesOrAddSetCodes(current);
+                    })
+                    .catch(err => {
+                        console.error(err);
+                        getPreviousSetCodesOrAddSetCodes(current);
+                    })
+                ;
+            })
+            .catch(err => {
+                console.log(err);
+                errors.push(cards[current].productName);
+                getPreviousSetCodesOrAddSetCodes(current);
+            });
+    }
+}
+
+function getPreviousSetCodesOrAddSetCodes(current) {
+    if (current !== 0) {
+        getAllSetCodes(current - 1);
+    } else {
+        addSetCodesToAllCards();
+    }
+}
+
+function addSetCodesToAllCards() {
+    for (let card of cards) {
+        if (setNameCodeMap.has(card.setName)) {
+            card.setCode = setNameCodeMap.get(card.setName);
+        }
+    }
+    filterCardsByPrice(baseValue);
+}
+
+function removeParenthesisFromCardName(cardName) {
+    if (cardName.indexOf('(') >= 0) {
+        return cardName.substring(0, cardName.indexOf('(')).trim();
+    }
+    return cardName;
 }
 
 function filterCardsByPrice(price) {
@@ -154,7 +191,7 @@ function filterCardsByPrice(price) {
 function formatCardsForDiscordBot(tempCards) {
     let messages = [];
     tempCards.forEach(card => {
-        messages.push(["[[", [card.fixedName, card.setCode, card.number].join("|"), "]]"].join("") + " $" + Math.ceil(card.marketPrice * .9));
+        messages.push(["[[", [removeParenthesisFromCardName(card.productName), card.setCode, card.number].join("|"), "]]"].join("") + " $" + Math.ceil(card.marketPrice * .9));
     });
     ncp.copy(messages.join("\n"));
     console.log("Copied message to clipboard");
@@ -196,7 +233,13 @@ function askForFileNameAndValue() {
 
 }
 
-askForFileNameAndValue('testInput');
+askForFileNameAndValue();
+//
+// function testfunc() {
+//     console.log(removeParenthesisFromCardName("Call Forth the Tempest (Borderless)"))
+// }
+//
+// testfunc();
 
 // All the code below here was borrowed from the utf8js library
 function ucs2decode(string) {
