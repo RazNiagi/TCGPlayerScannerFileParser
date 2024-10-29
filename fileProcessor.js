@@ -32,7 +32,6 @@ class CardData {
     rc = 0;
     value = '';
     cardId = '';
-    fixedName = '';
     setCode = '';
 
     constructor(id, product, setName, productName, title, number, rarity, condition, marketPrice, directLow, lowPrice, pending, total, addTo, marketPrice2,
@@ -59,14 +58,6 @@ class CardData {
         this.rc = rc;
         this.value = value;
         this.cardId = cardId;
-    }
-
-    setSetCode(code) {
-        this.setCode = code;
-    }
-
-    setFixedName(name) {
-        this.fixedName = name;
     }
 }
 
@@ -130,36 +121,77 @@ function removeQuotesFromNames() {
 }
 
 function getAllSetCodes(current) {
-    if (setNameCodeMap.has(cards[current].setName)) {
-        getPreviousSetCodesOrAddSetCodes(current);
-    } else {
-        scryfall.Cards.byName(removeParenthesisFromCardName(cards[current].productName), true)
-            .then(currentCardData => {
-                mtgsdk.card.where({name: currentCardData.name, number: cards[current].number})
-                    .then(data => {
-                        setNameCodeMap.set(cards[current].setName, data[0]?.set);
-                        getPreviousSetCodesOrAddSetCodes(current);
-                    })
-                    .catch(err => {
-                        console.error(err);
-                        getPreviousSetCodesOrAddSetCodes(current);
-                    })
-                ;
-            })
-            .catch(err => {
-                console.log(err);
-                errors.push(cards[current].productName);
-                getPreviousSetCodesOrAddSetCodes(current);
-            });
+    let sets = [];
+    let promises = [];
+    for (let cardInfo of cards) {
+        if (!setNameCodeMap.has(cardInfo.setName)) {
+            sets.push(cardInfo.setName);
+            setNameCodeMap.set(cardInfo.setName, null);
+            promises.push(scryfall.Cards.byName(removeParenthesisFromCardName(cardInfo.productName), true));
+        } else {
+            promises.push(Promise.resolve());
+        }
     }
-}
 
-function getPreviousSetCodesOrAddSetCodes(current) {
-    if (current !== 0) {
-        getAllSetCodes(current - 1);
-    } else {
-        addSetCodesToAllCards();
-    }
+    Promise.allSettled(promises)
+        .then(values => {
+            let innerPromises = [];
+            for (let i = 0; i < values.length; i++) {
+                if (values[i].status !== "fulfilled") {
+                    innerPromises.push(Promise.resolve());
+                    errors.push(cards[i].productName);
+                } else {
+                    if (values[i].value) {
+                        innerPromises.push(mtgsdk.card.where({name: values[i].value.name, number: cards[i].number}));
+                    } else {
+                        innerPromises.push(Promise.resolve());
+                    }
+                }
+            }
+            Promise.allSettled(innerPromises)
+                .then(innerValues => {
+                    let setErrors = [];
+                    for (let i = 0; i < innerValues.length; i++) {
+                        if (innerValues[i].status === "fulfilled" && innerValues[i].value !== undefined) {
+                            if (innerValues[i].value.length === 0) {
+                                setErrors.push(cards[i].setName);
+                            } else {
+                                setNameCodeMap.set(cards[i].setName, innerValues[i].value[0]?.set.toUpperCase());
+                            }
+                        }
+                    }
+                    if (setErrors.length > 0) {
+                        scryfall.Sets.all()
+                            .then(allSets => {
+                                if (allSets.length > 0) {
+                                    for (let setError of setErrors) {
+                                        let potentialSet = allSets.find(fullSet => fullSet.name === setError);
+                                        if (potentialSet) {
+                                            setNameCodeMap.set(setError, potentialSet.code.toUpperCase());
+                                        } else {
+                                            errors.push("Set code not found for " + setError);
+                                        }
+                                    }
+                                    addSetCodesToAllCards();
+                                } else {
+                                    for (let setError of setErrors) {
+                                        errors.push("Set code not found for " + setError);
+                                    }
+                                    addSetCodesToAllCards();
+                                }
+                            })
+                            .catch(err => {
+                                console.error(err);
+                                for (let setError of setErrors) {
+                                    errors.push("Set code not found for " + setError);
+                                }
+                                addSetCodesToAllCards();
+                            })
+                    } else {
+                        addSetCodesToAllCards();
+                    }
+                })
+        })
 }
 
 function addSetCodesToAllCards() {
@@ -181,7 +213,7 @@ function removeParenthesisFromCardName(cardName) {
 function filterCardsByPrice(price) {
     let tempCards = [];
     for (let card of cards) {
-        if (parseFloat(card.marketPrice) >= price) {
+        if (parseFloat(card.marketPrice) >= price && card.setCode != null) {
             tempCards.push(card);
         }
     }
@@ -194,27 +226,10 @@ function formatCardsForDiscordBot(tempCards) {
         messages.push(["[[", [removeParenthesisFromCardName(card.productName), card.setCode, card.number].join("|"), "]]"].join("") + " $" + Math.ceil(card.marketPrice * .9));
     });
     ncp.copy(messages.join("\n"));
+    if (errors.length) {
+        console.error(errors.join("\n"));
+    }
     console.log("Copied message to clipboard");
-}
-
-function parseCardName(value) {
-    let cardName = replaceUTFInName(value);
-    let maybeCardName = cardName.substring(3, cardName.length - 3);
-    if (maybeCardName.charAt(0) === '"' && maybeCardName.charAt(maybeCardName.length - 1) === '"') {
-        return maybeCardName.substring(1, maybeCardName.length - 1);
-    }
-    return maybeCardName;
-}
-
-function replaceUTFInName(name) {
-    const regex = /(\\[A-Za-z0-9]{3}){2}/g;
-    while (name.search(regex) >= 0) {
-        let regFindIndex = name.search(regex);
-        let newString = name.substring(regFindIndex, regFindIndex + 8);
-        let correctedCharacter = utf8decode(ucs2encode([parseInt(newString.substring(2,4), 16), parseInt(newString.substring(6,8), 16)]));
-        name = name.replace(newString, correctedCharacter);
-    }
-    return name;
 }
 
 function askForFileNameAndValue() {
@@ -225,7 +240,11 @@ function askForFileNameAndValue() {
     rl.question(`What is the file name? `, name => {
         fileName = name;
         rl.question(`What value to you want to filter above? `, baseVal => {
-            baseValue = parseFloat(baseVal);
+            if (baseVal === "") {
+                baseValue = 5.00;
+            } else {
+                baseValue = parseFloat(baseVal);
+            }
             readInFile(fileName);
             rl.close();
         });
@@ -234,150 +253,3 @@ function askForFileNameAndValue() {
 }
 
 askForFileNameAndValue();
-//
-// function testfunc() {
-//     console.log(removeParenthesisFromCardName("Call Forth the Tempest (Borderless)"))
-// }
-//
-// testfunc();
-
-// All the code below here was borrowed from the utf8js library
-function ucs2decode(string) {
-    var output = [];
-    var counter = 0;
-    var length = string.length;
-    var value;
-    var extra;
-    while (counter < length) {
-        value = string.charCodeAt(counter++);
-        if (value >= 0xD800 && value <= 0xDBFF && counter < length) {
-            // high surrogate, and there is a next character
-            extra = string.charCodeAt(counter++);
-            if ((extra & 0xFC00) == 0xDC00) { // low surrogate
-                output.push(((value & 0x3FF) << 10) + (extra & 0x3FF) + 0x10000);
-            } else {
-                // unmatched surrogate; only append this code unit, in case the next
-                // code unit is the high surrogate of a surrogate pair
-                output.push(value);
-                counter--;
-            }
-        } else {
-            output.push(value);
-        }
-    }
-    return output;
-}
-
-var byteArray;
-var byteCount;
-var byteIndex;
-
-function utf8decode(byteString) {
-    byteArray = ucs2decode(byteString);
-    byteCount = byteArray.length;
-    byteIndex = 0;
-    var codePoints = [];
-    var tmp;
-    while ((tmp = decodeSymbol()) !== false) {
-        codePoints.push(tmp);
-    }
-    return ucs2encode(codePoints);
-}
-
-function ucs2encode(array) {
-    var length = array.length;
-    var index = -1;
-    var value;
-    var output = '';
-    while (++index < length) {
-        value = array[index];
-        if (value > 0xFFFF) {
-            value -= 0x10000;
-            output += stringFromCharCode(value >>> 10 & 0x3FF | 0xD800);
-            value = 0xDC00 | value & 0x3FF;
-        }
-        output += stringFromCharCode(value);
-    }
-    return output;
-}
-
-function readContinuationByte() {
-    if (byteIndex >= byteCount) {
-        throw Error('Invalid byte index');
-    }
-
-    var continuationByte = byteArray[byteIndex] & 0xFF;
-    byteIndex++;
-
-    if ((continuationByte & 0xC0) == 0x80) {
-        return continuationByte & 0x3F;
-    }
-
-    // If we end up here, it’s not a continuation byte
-    throw Error('Invalid continuation byte');
-}
-
-function decodeSymbol() {
-    var byte1;
-    var byte2;
-    var byte3;
-    var byte4;
-    var codePoint;
-
-    if (byteIndex > byteCount) {
-        throw Error('Invalid byte index');
-    }
-
-    if (byteIndex == byteCount) {
-        return false;
-    }
-
-    // Read first byte
-    byte1 = byteArray[byteIndex] & 0xFF;
-    byteIndex++;
-
-    // 1-byte sequence (no continuation bytes)
-    if ((byte1 & 0x80) == 0) {
-        return byte1;
-    }
-
-    // 2-byte sequence
-    if ((byte1 & 0xE0) == 0xC0) {
-        byte2 = readContinuationByte();
-        codePoint = ((byte1 & 0x1F) << 6) | byte2;
-        if (codePoint >= 0x80) {
-            return codePoint;
-        } else {
-            throw Error('Invalid continuation byte');
-        }
-    }
-
-    // 3-byte sequence (may include unpaired surrogates)
-    if ((byte1 & 0xF0) == 0xE0) {
-        byte2 = readContinuationByte();
-        byte3 = readContinuationByte();
-        codePoint = ((byte1 & 0x0F) << 12) | (byte2 << 6) | byte3;
-        if (codePoint >= 0x0800) {
-            checkScalarValue(codePoint);
-            return codePoint;
-        } else {
-            throw Error('Invalid continuation byte');
-        }
-    }
-
-    // 4-byte sequence
-    if ((byte1 & 0xF8) == 0xF0) {
-        byte2 = readContinuationByte();
-        byte3 = readContinuationByte();
-        byte4 = readContinuationByte();
-        codePoint = ((byte1 & 0x07) << 0x12) | (byte2 << 0x0C) |
-            (byte3 << 0x06) | byte4;
-        if (codePoint >= 0x010000 && codePoint <= 0x10FFFF) {
-            return codePoint;
-        }
-    }
-
-    throw Error('Invalid UTF-8 detected');
-}
-
-var stringFromCharCode = String.fromCharCode;
