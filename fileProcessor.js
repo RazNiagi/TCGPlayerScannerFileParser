@@ -3,6 +3,8 @@ let fs = require('fs');
 const mtgsdk = require('mtgsdk');
 const ncp = require('copy-paste');
 const scryfall = require('scryfall-api');
+const os = require('os');
+
 readline.emitKeypressEvents(process.stdin);
 
 if (process.stdin.isTTY) {
@@ -66,6 +68,11 @@ let baseValue = 0;
 let fileName = '';
 let setNameCodeMap = new Map();
 let errors = [];
+let documentsFileExtension = "\\Documents\\TCGRocaFileParser\\"
+let setNameCodeMapFile = "setNameCodeMap.json";
+let scryfallSetsDataFile = "scryfallSetsData.json";
+let scryfallSetsData = [];
+
 function readInFile(fileName) {
     const rl = readline.createInterface({
         input: fs.createReadStream('./' + fileName + '.csv'),
@@ -117,14 +124,25 @@ function removeQuotesFromNames() {
     for (let card of cards) {
         card.productName = card.productName.replaceAll('"', '');
     }
-    getAllSetCodes(cards.length - 1);
+    filterCardsOverPrice(baseValue);
+    populateExistingSetNames();
+    addSetCodesToAllCards(false);
+    getAllSetCodes();
 }
 
-function getAllSetCodes(current) {
+function populateExistingSetNames() {
+    for (let card of cards) {
+        if (setNameCodeMap.has(card.setName)) {
+            card.setCode = setNameCodeMap.get(card.setName);
+        }
+    }
+}
+
+function getAllSetCodes() {
     let sets = [];
     let promises = [];
     for (let cardInfo of cards) {
-        if (!setNameCodeMap.has(cardInfo.setName)) {
+        if (!setNameCodeMap.has(cardInfo.setName) || setNameCodeMap.get(cardInfo.setName) === null) {
             sets.push(cardInfo.setName);
             setNameCodeMap.set(cardInfo.setName, null);
             promises.push(scryfall.Cards.byName(removeParenthesisFromCardName(cardInfo.productName), true));
@@ -132,75 +150,76 @@ function getAllSetCodes(current) {
             promises.push(Promise.resolve());
         }
     }
-
-    Promise.allSettled(promises)
-        .then(values => {
-            let innerPromises = [];
-            for (let i = 0; i < values.length; i++) {
-                if (values[i].status !== "fulfilled") {
-                    innerPromises.push(Promise.resolve());
-                    errors.push(cards[i].productName);
-                } else {
-                    if (values[i].value) {
-                        innerPromises.push(mtgsdk.card.where({name: values[i].value.name, number: cards[i].number}));
-                    } else {
+    if (sets.length === 0) {
+        console.log("No calls needed, set codes already established");
+        filterCardsWithSetCodes();
+    } else {
+        console.log("Making initial calls to Scryfall to ensure card name");
+        Promise.allSettled(promises)
+            .then(values => {
+                let innerPromises = [];
+                for (let i = 0; i < values.length; i++) {
+                    if (values[i].status !== "fulfilled") {
                         innerPromises.push(Promise.resolve());
-                    }
-                }
-            }
-            Promise.allSettled(innerPromises)
-                .then(innerValues => {
-                    let setErrors = [];
-                    for (let i = 0; i < innerValues.length; i++) {
-                        if (innerValues[i].status === "fulfilled" && innerValues[i].value !== undefined) {
-                            if (innerValues[i].value.length === 0) {
-                                setErrors.push(cards[i].setName);
-                            } else {
-                                setNameCodeMap.set(cards[i].setName, innerValues[i].value[0]?.set.toUpperCase());
-                            }
+                        errors.push(cards[i].productName);
+                    } else {
+                        if (values[i].value) {
+                            innerPromises.push(mtgsdk.card.where({name: values[i].value.name, number: cards[i].number}));
+                        } else {
+                            innerPromises.push(Promise.resolve());
                         }
                     }
-                    if (setErrors.length > 0) {
-                        scryfall.Sets.all()
-                            .then(allSets => {
-                                if (allSets.length > 0) {
-                                    for (let setError of setErrors) {
-                                        let potentialSet = allSets.find(fullSet => fullSet.name === setError);
-                                        if (potentialSet) {
-                                            setNameCodeMap.set(setError, potentialSet.code.toUpperCase());
-                                        } else {
-                                            errors.push("Set code not found for " + setError);
-                                        }
-                                    }
-                                    addSetCodesToAllCards();
+                }
+                console.log("Making secondary calls to mtgsdk for specific card versions");
+                Promise.allSettled(innerPromises)
+                    .then(innerValues => {
+                        let setErrors = [];
+                        for (let i = 0; i < innerValues.length; i++) {
+                            if (innerValues[i].status === "fulfilled" && innerValues[i].value !== undefined) {
+                                if (innerValues[i].value.length === 0) {
+                                    setErrors.push(cards[i].setName);
                                 } else {
-                                    for (let setError of setErrors) {
-                                        errors.push("Set code not found for " + setError);
-                                    }
-                                    addSetCodesToAllCards();
+                                    setNameCodeMap.set(cards[i].setName, innerValues[i].value[0]?.set.toUpperCase());
                                 }
-                            })
-                            .catch(err => {
-                                console.error(err);
-                                for (let setError of setErrors) {
-                                    errors.push("Set code not found for " + setError);
-                                }
-                                addSetCodesToAllCards();
-                            })
-                    } else {
+                            }
+                        }
+                        if (setErrors.length > 0) {
+                            for (let setError of setErrors) {
+                                errors.push("Set code not found for " + setError);
+                            }
+                        }
                         addSetCodesToAllCards();
-                    }
-                })
-        })
+                    })
+            })
+    }
 }
 
-function addSetCodesToAllCards() {
+function addSetCodesToAllCards(filterDown = true) {
     for (let card of cards) {
-        if (setNameCodeMap.has(card.setName)) {
+        if (setNameCodeMap.has(card.setName) && setNameCodeMap.get(card.setName) !== null) {
             card.setCode = setNameCodeMap.get(card.setName);
+        } else {
+            let altName = alternatePotentialSetName(card.setName);
+            if (altName !== card.setName && setNameCodeMap.has(altName)) {
+                card.setCode = setNameCodeMap.get(altName);
+                setNameCodeMap.set(card.setName, setNameCodeMap.get(altName));
+            }
         }
     }
-    filterCardsByPrice(baseValue);
+    if (filterDown) {
+        filterCardsWithSetCodes();
+    }
+}
+
+function alternatePotentialSetName(name) {
+    let newName = "";
+    if (name.startsWith("Universes Beyond: ")) {
+        newName = name.replace("Universes Beyond: ", "");
+    }
+    if (name.startsWith("Commander: ")) {
+        newName = name.replace("Commander: ", "") + " Commander";
+    }
+    return newName;
 }
 
 function removeParenthesisFromCardName(cardName) {
@@ -210,14 +229,19 @@ function removeParenthesisFromCardName(cardName) {
     return cardName;
 }
 
-function filterCardsByPrice(price) {
+function filterCardsOverPrice(price) {
+    cards = cards.filter(card => parseFloat(card.marketPrice) >= price);
+}
+
+function filterCardsWithSetCodes() {
     let tempCards = [];
     for (let card of cards) {
-        if (parseFloat(card.marketPrice) >= price && card.setCode != null) {
+        if (card.setCode != null) {
             tempCards.push(card);
         }
     }
     formatCardsForDiscordBot(tempCards);
+    saveSetNameCodeMapToFile();
 }
 
 function formatCardsForDiscordBot(tempCards) {
@@ -249,7 +273,100 @@ function askForFileNameAndValue() {
             rl.close();
         });
     });
-
 }
 
-askForFileNameAndValue();
+function importScryfallSetsDataAndCodeMap() {
+    if (!scryfallSetsData.length) {
+        console.log("Importing Scryfall set data");
+        scryfallSetsData = JSON.parse(fs.readFileSync(os.homedir() + documentsFileExtension + scryfallSetsDataFile, "utf8"));
+    }
+    console.log("Importing set code map data");
+    const setCodeMapData = fs.readFileSync(os.homedir() + documentsFileExtension + setNameCodeMapFile, "utf8")
+    if (setCodeMapData.length > 0) {
+        setNameCodeMap = new Map(Object.entries(JSON.parse(setCodeMapData)));
+    }
+    populateSetNameCodeMapFromScryfall();
+    askForFileNameAndValue();
+}
+
+function populateSetNameCodeMapFromScryfall() {
+    console.log("Adding set names and codes to map from Scryfall data");
+    let setNamesFromScryfall = new Set(scryfallSetsData.map(setInfo => setInfo.name));
+    if (setNameCodeMap.size > 0) {
+        for (let key of setNameCodeMap.keys()) {
+            if (setNamesFromScryfall.has(key)) {
+                setNamesFromScryfall.delete(key);
+            }
+        }
+    }
+    setNamesFromScryfall.forEach(setName => {
+        setNameCodeMap.set(setName, scryfallSetsData.find(setInfo => setInfo.name === setName).code.toUpperCase());
+    })
+    console.log("Finished populating pre-existing set names");
+}
+
+function saveSetNameCodeMapToFile() {
+    console.log("Saving set name code data to file");
+    fs.writeFileSync(os.homedir() + documentsFileExtension + setNameCodeMapFile, JSON.stringify(Object.fromEntries(setNameCodeMap)));
+}
+
+/**********Check if data needs updating at start of script with functions below*************/
+
+function shouldUpdateScryfallSetsDataFile() {
+    const filePath = os.homedir() + documentsFileExtension + scryfallSetsDataFile;
+    const stats = fs.statSync(filePath);
+    return differenceInDays(stats.mtime, new Date()) > 0 || stats.size === 0;
+}
+
+function differenceInDays(date1, date2) {
+    const diffTime = Math.abs(date2 - date1);
+    return Math.floor(diffTime / (1000 * 60 * 60 * 24));
+}
+
+function createDataFolderIfDoesNotExist() {
+    const folderPath = os.homedir() + documentsFileExtension;
+    if (!fs.existsSync(folderPath)) {
+        fs.mkdirSync(folderPath);
+    }
+}
+
+function createFileIfDoesNotExist(fileName) {
+    const filePath = os.homedir() + documentsFileExtension + fileName;
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, "");
+    }
+}
+
+function ensureDataFilesExist() {
+    console.log("Creating files for Scryfall set data and code map. Files will be in " + os.homedir() + documentsFileExtension.replace("/", "\\"));
+    createDataFolderIfDoesNotExist();
+    createFileIfDoesNotExist(scryfallSetsDataFile);
+    createFileIfDoesNotExist(setNameCodeMapFile);
+}
+
+function updateScryfallData() {
+    ensureDataFilesExist();
+    if (shouldUpdateScryfallSetsDataFile()) {
+        console.log("Updating Scryfall sets data");
+        try {
+            scryfall.Sets.all()
+                .then(setsData => {
+                    const filePath = os.homedir() + documentsFileExtension + scryfallSetsDataFile;
+                    scryfallSetsData = setsData;
+                    fs.writeFileSync(filePath, JSON.stringify(setsData));
+                    importScryfallSetsDataAndCodeMap();
+                })
+                .catch(err => console.log(err));
+        } catch (err) {
+            console.log(err);
+            importScryfallSetsDataAndCodeMap();
+        }
+    } else {
+        console.log("Scryfall data is up to date");
+        importScryfallSetsDataAndCodeMap()
+    }
+}
+
+/**********Check if data needs updating at start of script with functions above*************/
+
+updateScryfallData();
