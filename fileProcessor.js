@@ -35,6 +35,7 @@ class CardData {
     value = '';
     cardId = '';
     setCode = '';
+    askingPrice = 0;
 
     constructor(id, product, setName, productName, title, number, rarity, condition, marketPrice, directLow, lowPrice, pending, total, addTo, marketPrice2,
                 myStoreReserve, myStorePrice, photoUrl, rs, rc, value, cardId) {
@@ -152,6 +153,9 @@ function getAllSetCodes() {
     }
     if (sets.length === 0) {
         console.log("No calls needed, set codes already established");
+        replaceSetCodesForEdgeCases();
+        addAskingPriceToEachCard();
+        sortCardsByAskingPrice();
         filterCardsWithSetCodes();
     } else {
         console.log("Making initial calls to Scryfall to ensure card name");
@@ -207,6 +211,9 @@ function addSetCodesToAllCards(filterDown = true) {
         }
     }
     if (filterDown) {
+        replaceSetCodesForEdgeCases();
+        addAskingPriceToEachCard();
+        sortCardsByAskingPrice();
         filterCardsWithSetCodes();
     }
 }
@@ -229,6 +236,36 @@ function removeParenthesisFromCardName(cardName) {
     return cardName;
 }
 
+function replaceSetCodesForEdgeCases() {
+    for (let card of cards) {
+        if (card.setCode === "MH1" && card.productName.includes("(Retro Frame)")) {
+            card.setCode = "H1R";
+        }
+        if (card.setCode === "MH2" && card.productName.includes("(Retro Frame)")) {
+            card.setCode = "H2R";
+        }
+        if (card.setCode === "BRO" && card.productName.includes("(")) {
+            card.setCode = "BRR";
+        }
+    }
+}
+
+function addAskingPriceToEachCard() {
+    for (let card of cards) {
+        card.askingPrice = Math.ceil(card.marketPrice * .9);
+    }
+}
+
+function sortCardsByAskingPrice() {
+    cards.sort((a, b) => {
+        if (a.askingPrice !== b.askingPrice) {
+            return a.askingPrice - b.askingPrice;
+        } else {
+            return a.productName.localeCompare(b.productName);
+        }
+    });
+}
+
 function filterCardsOverPrice(price) {
     cards = cards.filter(card => parseFloat(card.marketPrice) >= price);
 }
@@ -247,7 +284,7 @@ function filterCardsWithSetCodes() {
 function formatCardsForDiscordBot(tempCards) {
     let messages = [];
     tempCards.forEach(card => {
-        messages.push(["[[", [removeParenthesisFromCardName(card.productName), card.setCode, card.number].join("|"), "]]"].join("") + " $" + Math.ceil(card.marketPrice * .9));
+        messages.push(["[[", [removeParenthesisFromCardName(card.productName), card.setCode, card.number].join("|"), "]]"].join("") + " $" + card.askingPrice);
     });
     ncp.copy(messages.join("\n"));
     if (errors.length) {
