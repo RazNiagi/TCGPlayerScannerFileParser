@@ -64,6 +64,44 @@ class CardData {
     }
 }
 
+class TcgCardData {
+    quantity = 0;
+    name = '';
+    simpleName = '';
+    set = '';
+    cardNumber = '';
+    setCode = '';
+    externalId = '';
+    printing = '';
+    condition = '';
+    language = '';
+    rarity = '';
+    productId = '';
+    sku = '';
+    price = '';
+    priceEach = '';
+    setCodeForScryfall = '';
+    askingPrice = '';
+
+    constructor(quantity, name, simpleName, set, cardNumber, setCode, externalId, printing, condition, language, rarity, productId, sku, price, priceEach) {
+        this.quantity = quantity;
+        this.name = name;
+        this.simpleName = simpleName;
+        this.set = set;
+        this.cardNumber = cardNumber;
+        this.setCode = setCode;
+        this.externalId = externalId;
+        this.printing = printing;
+        this.condition = condition;
+        this.language = language;
+        this.rarity = rarity;
+        this.productId = productId;
+        this.sku = sku;
+        this.price = price;
+        this.priceEach = priceEach;
+    }
+}
+
 let cards = [];
 let baseValue = 0;
 let fileName = '';
@@ -73,6 +111,7 @@ let documentsFileExtension = "\\Documents\\TCGRocaFileParser\\"
 let setNameCodeMapFile = "setNameCodeMap.json";
 let scryfallSetsDataFile = "scryfallSetsData.json";
 let scryfallSetsData = [];
+let isRocaFile = true;
 
 function readInFile(fileName) {
     const rl = readline.createInterface({
@@ -82,6 +121,10 @@ function readInFile(fileName) {
 
     let firstLine = true;
     rl.on('line', (line) => {
+        if (firstLine && line.split(',').length === 15) {
+            isRocaFile = false;
+        }
+
         // Process each line here
         if (!firstLine) {
             const sl = line.split(',');
@@ -111,13 +154,17 @@ function readInFile(fileName) {
                     sl.shift();
                 }
             }
-            cards.push(new CardData(...fixedSl));
+            cards.push(isRocaFile ? new CardData(...fixedSl) : new TcgCardData(...fixedSl));
         }
         firstLine = false;
     });
 
     rl.on('close', () => {
-        removeQuotesFromNames();
+        if (isRocaFile) {
+            removeQuotesFromNames();
+        } else {
+            removeQuotesFromNamesTcgFile();
+        }
     });
 }
 
@@ -131,10 +178,36 @@ function removeQuotesFromNames() {
     getAllSetCodes();
 }
 
-function populateExistingSetNames() {
+function removeQuotesFromNamesTcgFile() {
     for (let card of cards) {
-        if (setNameCodeMap.has(card.setName)) {
-            card.setCode = setNameCodeMap.get(card.setName);
+        card.simpleName = card.simpleName.replaceAll('"', '');
+    }
+    removeDollarSignsFromCardPrices();
+    filterCardsOverPrice(baseValue);
+    populateExistingSetNames();
+    addSetCodesToAllCards(false);
+    getAllSetCodes();
+}
+
+function removeDollarSignsFromCardPrices() {
+    for (let card of cards) {
+        card.price = card.price.replaceAll('$', '');
+        card.priceEach = card.priceEach.replaceAll('$', '');
+    }
+}
+
+function populateExistingSetNames() {
+    if (isRocaFile) {
+        for (let card of cards) {
+            if (setNameCodeMap.has(card.setName)) {
+                card.setCode = setNameCodeMap.get(card.setName);
+            }
+        }
+    } else {
+        for (let card of cards) {
+            if (setNameCodeMap.has(card.set)) {
+                card.setCodeForScryfall = setNameCodeMap.get(card.set);
+            }
         }
     }
 }
@@ -142,76 +215,126 @@ function populateExistingSetNames() {
 function getAllSetCodes() {
     let sets = [];
     let promises = [];
-    for (let cardInfo of cards) {
-        if (!setNameCodeMap.has(cardInfo.setName) || setNameCodeMap.get(cardInfo.setName) === null) {
-            sets.push(cardInfo.setName);
-            setNameCodeMap.set(cardInfo.setName, null);
-            promises.push(scryfall.Cards.byName(removeParenthesisFromCardName(cardInfo.productName), true));
-        } else {
-            promises.push(Promise.resolve());
+    if (isRocaFile) {
+        for (let cardInfo of cards) {
+            if (!setNameCodeMap.has(cardInfo.setName) || setNameCodeMap.get(cardInfo.setName) === null) {
+                sets.push(cardInfo.setName);
+                setNameCodeMap.set(cardInfo.setName, null);
+                promises.push(scryfall.Cards.byName(removeParenthesisFromCardName(cardInfo.productName), true));
+            } else {
+                promises.push(Promise.resolve());
+            }
         }
-    }
-    if (sets.length === 0) {
-        console.log("No calls needed, set codes already established");
-        replaceSetCodesForEdgeCases();
-        addAskingPriceToEachCard();
-        sortCardsByAskingPrice();
-        filterCardsWithSetCodes();
+        if (sets.length === 0) {
+            console.log("No calls needed, set codes already established");
+            replaceSetCodesForEdgeCases();
+            addAskingPriceToEachCard();
+            sortCardsByAskingPrice();
+            filterCardsWithSetCodes();
+        } else {
+            console.log("Making initial calls to Scryfall to ensure card name");
+            Promise.allSettled(promises)
+                .then(values => {
+                    let innerPromises = [];
+                    for (let i = 0; i < values.length; i++) {
+                        if (values[i].status !== "fulfilled") {
+                            innerPromises.push(Promise.resolve());
+                            errors.push(cards[i].productName);
+                        } else {
+                            if (values[i].value) {
+                                innerPromises.push(mtgsdk.card.where({name: values[i].value.name, number: cards[i].number}));
+                            } else {
+                                innerPromises.push(Promise.resolve());
+                            }
+                        }
+                    }
+                    console.log("Making secondary calls to mtgsdk for specific card versions");
+                    Promise.allSettled(innerPromises)
+                        .then(innerValues => {
+                            let setErrors = [];
+                            for (let i = 0; i < innerValues.length; i++) {
+                                if (innerValues[i].status === "fulfilled" && innerValues[i].value !== undefined) {
+                                    if (innerValues[i].value.length === 0) {
+                                        setErrors.push(cards[i].setName);
+                                    } else {
+                                        setNameCodeMap.set(cards[i].setName, innerValues[i].value[0]?.set.toUpperCase());
+                                    }
+                                }
+                            }
+                            if (setErrors.length > 0) {
+                                for (let setError of setErrors) {
+                                    errors.push("Set code not found for " + setError);
+                                }
+                            }
+                            addSetCodesToAllCards();
+                        })
+                })
+        }
     } else {
-        console.log("Making initial calls to Scryfall to ensure card name");
+        for (let cardInfo of cards) {
+            if (!setNameCodeMap.has(cardInfo.set) || setNameCodeMap.get(cardInfo.set) === null) {
+                sets.push(cardInfo.set);
+                setNameCodeMap.set(cardInfo.set, null);
+                promises.push(scryfall.Cards.byTcgPlayerId(cardInfo.productId));
+            } else {
+                promises.push(Promise.resolve());
+            }
+        }
+        if (sets.length === 0) {
+            console.log("No calls needed, set codes already established");
+            addAskingPriceToEachCard();
+            sortCardsByAskingPrice();
+            filterCardsWithSetCodes();
+        }
+        console.log("Making calls to Scryfall to get specific cards by tcgplayer Id");
         Promise.allSettled(promises)
             .then(values => {
-                let innerPromises = [];
                 for (let i = 0; i < values.length; i++) {
                     if (values[i].status !== "fulfilled") {
-                        innerPromises.push(Promise.resolve());
                         errors.push(cards[i].productName);
                     } else {
                         if (values[i].value) {
-                            innerPromises.push(mtgsdk.card.where({name: values[i].value.name, number: cards[i].number}));
-                        } else {
-                            innerPromises.push(Promise.resolve());
+                            cards[i].setCodeForScryfall = values[i]?.value[0]?.set.toUpperCase();
+                            setNameCodeMap.set(cards[i].set, values[i].value?.set.toUpperCase());
                         }
                     }
                 }
-                console.log("Making secondary calls to mtgsdk for specific card versions");
-                Promise.allSettled(innerPromises)
-                    .then(innerValues => {
-                        let setErrors = [];
-                        for (let i = 0; i < innerValues.length; i++) {
-                            if (innerValues[i].status === "fulfilled" && innerValues[i].value !== undefined) {
-                                if (innerValues[i].value.length === 0) {
-                                    setErrors.push(cards[i].setName);
-                                } else {
-                                    setNameCodeMap.set(cards[i].setName, innerValues[i].value[0]?.set.toUpperCase());
-                                }
-                            }
-                        }
-                        if (setErrors.length > 0) {
-                            for (let setError of setErrors) {
-                                errors.push("Set code not found for " + setError);
-                            }
-                        }
-                        addSetCodesToAllCards();
-                    })
+                addSetCodesToAllCards();
             })
     }
 }
 
 function addSetCodesToAllCards(filterDown = true) {
-    for (let card of cards) {
-        if (setNameCodeMap.has(card.setName) && setNameCodeMap.get(card.setName) !== null) {
-            card.setCode = setNameCodeMap.get(card.setName);
-        } else {
-            let altName = alternatePotentialSetName(card.setName);
-            if (altName !== card.setName && setNameCodeMap.has(altName)) {
-                card.setCode = setNameCodeMap.get(altName);
-                setNameCodeMap.set(card.setName, setNameCodeMap.get(altName));
+    if (isRocaFile) {
+        for (let card of cards) {
+            if (setNameCodeMap.has(card.setName) && setNameCodeMap.get(card.setName) !== null) {
+                card.setCode = setNameCodeMap.get(card.setName);
+            } else {
+                let altName = alternatePotentialSetName(card.setName);
+                if (altName !== card.setName && setNameCodeMap.has(altName)) {
+                    card.setCode = setNameCodeMap.get(altName);
+                    setNameCodeMap.set(card.setName, setNameCodeMap.get(altName));
+                }
+            }
+        }
+    } else {
+        for (let card of cards) {
+            if (setNameCodeMap.has(card.set) && setNameCodeMap.get(card.set) !== null) {
+                card.setCodeForScryfall = setNameCodeMap.get(card.set);
+            } else {
+                let altName = alternatePotentialSetName(card.set);
+                if (altName !== card.set && setNameCodeMap.has(altName)) {
+                    card.setCodeForScryfall = setNameCodeMap.get(altName);
+                    setNameCodeMap.set(card.set, setNameCodeMap.get(altName));
+                }
             }
         }
     }
+
     if (filterDown) {
-        replaceSetCodesForEdgeCases();
+        if (isRocaFile) {
+            replaceSetCodesForEdgeCases();
+        }
         addAskingPriceToEachCard();
         sortCardsByAskingPrice();
         filterCardsWithSetCodes();
@@ -252,7 +375,7 @@ function replaceSetCodesForEdgeCases() {
 
 function addAskingPriceToEachCard() {
     for (let card of cards) {
-        card.askingPrice = Math.ceil(card.marketPrice * .9);
+        card.askingPrice = isRocaFile ? Math.ceil(card.marketPrice * .9) : Math.ceil(card.priceEach * .9);
     }
 }
 
@@ -261,20 +384,30 @@ function sortCardsByAskingPrice() {
         if (a.askingPrice !== b.askingPrice) {
             return a.askingPrice - b.askingPrice;
         } else {
-            return a.productName.localeCompare(b.productName);
+            return isRocaFile ? a.productName.localeCompare(b.productName) : a.simpleName.localeCompare(b.simpleName);
         }
     });
 }
 
 function filterCardsOverPrice(price) {
-    cards = cards.filter(card => parseFloat(card.marketPrice) >= price);
+    if (isRocaFile) {
+        cards = cards.filter(card => parseFloat(card.marketPrice) >= price);
+    } else {
+        cards = cards.filter(card => parseFloat(card.priceEach) >= price);
+    }
 }
 
 function filterCardsWithSetCodes() {
     let tempCards = [];
     for (let card of cards) {
-        if (card.setCode != null) {
-            tempCards.push(card);
+        if (isRocaFile) {
+            if (card.setCode != null) {
+                tempCards.push(card);
+            }
+        } else {
+            if (card.setCodeForScryfall != null) {
+                tempCards.push(card);
+            }
         }
     }
     formatCardsForDiscordBot(tempCards);
@@ -283,9 +416,15 @@ function filterCardsWithSetCodes() {
 
 function formatCardsForDiscordBot(tempCards) {
     let messages = [];
-    tempCards.forEach(card => {
-        messages.push(["[[", [removeParenthesisFromCardName(card.productName), card.setCode, card.number].join("|"), "]]"].join("") + " $" + card.askingPrice);
-    });
+    if (isRocaFile) {
+        tempCards.forEach(card => {
+            messages.push(["[[", [removeParenthesisFromCardName(card.productName), card.setCode, card.number].join("|"), "]]"].join("") + " $" + card.askingPrice);
+        });
+    } else {
+        tempCards.forEach(card => {
+            messages.push(["[[", [removeParenthesisFromCardName(card.simpleName), card.setCodeForScryfall, card.cardNumber].join("|"), "]]"].join("") + " $" + card.askingPrice);
+        });
+    }
     ncp.copy(messages.join("\n"));
     if (errors.length) {
         console.error(errors.join("\n"));
