@@ -137,7 +137,7 @@ function readInFile(fileName) {
                     tempStrs.push(sl[0])
                     sl.shift();
                     while (!rightQuoteFound) {
-                        if (sl[0].includes('"')) {
+                        if (sl[0].includes('"') && numQuotesInString(sl[0]) % 2 !== 0) {
                             rightQuoteFound = true;
                         }
                         tempStrs.push(sl[0]);
@@ -166,6 +166,14 @@ function readInFile(fileName) {
             removeQuotesFromNamesTcgFile();
         }
     });
+}
+
+function numQuotesInString(str) {
+    let charMap = new Map();
+    for (let char of str) {
+        charMap.set(char, (charMap.get(char) || 0) + 1);
+    }
+    return charMap.get('"');
 }
 
 function removeQuotesFromNames() {
